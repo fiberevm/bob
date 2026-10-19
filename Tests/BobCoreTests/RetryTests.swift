@@ -54,14 +54,42 @@ final class RetryTests: XCTestCase {
         XCTAssertEqual(response.text, "Done"); XCTAssertEqual(RetryFixtureProtocol.count, 2)
         let recorded = await delays.values; XCTAssertEqual(recorded, [2])
     }
-    func testAuthenticationAndQuotaErrorsAreNotRetried() async throws {
-        for (status, code) in [(401, "invalid_api_key"), (429, "insufficient_quota")] {
+    func testQuotaAndForbiddenErrorsAreNotRetried() async throws {
+        for (status, code) in [(403, "forbidden"), (429, "insufficient_quota")] {
             RetryFixtureProtocol.configure([.init(status: status, body: "{\"error\":{\"code\":\"\(code)\",\"message\":\"blocked\"}}")])
             let (model, session) = client(policy: RetryPolicy(sleep: { _ in XCTFail("Must not retry") }))
             defer { session.invalidateAndCancel() }
             do { _ = try await model.complete(messages: [], system: "", tools: [], onText: { _ in }); XCTFail("Expected failure") } catch {}
             XCTAssertEqual(RetryFixtureProtocol.count, 1)
         }
+    }
+    func testTransientUnauthorizedIsRetried() async throws {
+        RetryFixtureProtocol.configure([
+            .init(status: 401, body: "{\"error\":{\"code\":\"invalid_api_key\",\"message\":\"Unauthorized\"}}"),
+            .init(status: 200, body: completed)
+        ])
+        let delays = DelayLog(), (model, session) = client(policy: RetryPolicy(sleep: { await delays.add($0) }))
+        defer { session.invalidateAndCancel() }
+        let result = try await model.complete(messages: [], system: "", tools: [], onText: { _ in })
+        XCTAssertEqual(result.text, "Done")
+        XCTAssertEqual(RetryFixtureProtocol.count, 2)
+        let recorded = await delays.values
+        XCTAssertEqual(recorded, [0.5])
+        XCTAssertEqual(RetryFixtureProtocol.bodies[0], RetryFixtureProtocol.bodies[1])
+    }
+    func testPersistentUnauthorizedExhaustsRetryBudget() async throws {
+        RetryFixtureProtocol.configure(Array(repeating: .init(status: 401, body: "Unauthorized"), count: 3))
+        let delays = DelayLog(), (model, session) = client(policy: RetryPolicy(sleep: { await delays.add($0) }))
+        defer { session.invalidateAndCancel() }
+        do {
+            _ = try await model.complete(messages: [], system: "", tools: [], onText: { _ in })
+            XCTFail("Expected authentication failure")
+        } catch let error as ModelHTTPError {
+            XCTAssertTrue(error.message.contains("HTTP 401: Unauthorized"))
+        }
+        XCTAssertEqual(RetryFixtureProtocol.count, 3)
+        let recorded = await delays.values
+        XCTAssertEqual(recorded, [0.5, 1])
     }
     private func chunk(_ text: String, finish: Bool = false) -> String {
         let choice: [String: Any] = ["delta": ["content": text], "finish_reason": finish ? "stop" : NSNull()]

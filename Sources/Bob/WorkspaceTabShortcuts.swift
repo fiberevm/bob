@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// SwiftUI's built-in Close Window also owns ⌘W. Route it before menu dispatch,
+/// Route workspace shortcuts before menu dispatch (and terminal text input),
 /// only in this project's key window; sheets and other windows keep normal handling.
 struct WorkspaceTabShortcuts: NSViewRepresentable {
     let store: AppStore
@@ -12,11 +12,20 @@ struct WorkspaceTabShortcuts: NSViewRepresentable {
             let handled = MainActor.assumeIsolated {
                 guard let view, let window = view.window, window.isKeyWindow,
                       (event.window ?? NSApp.keyWindow) === window,
-                      event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
-                      event.charactersIgnoringModifiers?.lowercased() == "w",
-                      let store, store.showWorkspacePanel, store.selectedTabID != nil else { return false }
-                store.closeSelectedTab()
-                return true
+                      window.attachedSheet == nil,
+                      let store, store.showWorkspacePanel else { return false }
+                let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+                // Use the physical grave key: Option changes its produced character to a dead key.
+                if modifiers == .option && event.keyCode == 50 {
+                    if !event.isARepeat { store.toggleEditorTerminal() }
+                    return true
+                }
+                if modifiers == .command && event.charactersIgnoringModifiers?.lowercased() == "w",
+                   store.selectedTabID != nil {
+                    store.closeSelectedTab()
+                    return true
+                }
+                return false
             }
             return handled ? nil : event
         }

@@ -28,9 +28,11 @@ public struct Message: Codable, Identifiable, Equatable {
     public var text: String
     public var date: Date
     public var tool: ToolActivity?
+    public var images: [ModelImage]?
     public var isSteering: Bool?
-    public init(role: Role, text: String, id: UUID = UUID(), tool: ToolActivity? = nil, isSteering: Bool = false) {
+    public init(role: Role, text: String, id: UUID = UUID(), tool: ToolActivity? = nil, isSteering: Bool = false, images: [ModelImage] = []) {
         self.id = id; self.role = role; self.text = text; self.date = Date(); self.tool = tool
+        self.images = images.isEmpty ? nil : images
         self.isSteering = isSteering ? true : nil
     }
 }
@@ -42,6 +44,8 @@ public struct Session: Codable, Identifiable {
     public var provider: ProviderKind = .chatgpt
     public var model: String = ""
     public var reasoningEffort: String?
+    /// Unsubmitted composer text. Optional for compatibility with older workspaces.
+    public var promptDraft: String?
     public var plan: String?
     public var usageRecords: [String: ModelUsage]?
     public var contextUsage: ContextUsage?

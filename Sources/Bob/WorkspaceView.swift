@@ -142,43 +142,49 @@ struct SidebarView: View {
                 }.font(.system(size: 12)).padding(.horizontal, 10).frame(height: 34)
             }.buttonStyle(NavigationRowStyle()).padding(.horizontal, 10).padding(.vertical, 12).help("New Chat · ⌘N")
             FadingScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
-                        ForEach(store.sessions) { session in
-                            let status = store.sessionStatus(session)
-                            HStack(spacing: 0) {
-                                Button { store.select(session.id) } label: {
-                                    HStack(alignment: .center, spacing: 8) {
-                                        Text(session.title).font(.system(size: 12))
-                                            .lineLimit(1).truncationMode(.tail)
-                                        Spacer(minLength: 0)
-                                        if let status {
-                                            Group {
-                                                switch status {
-                                                case .working: ProgressView().controlSize(.mini)
-                                                case .done: Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.added)
-                                                }
-                                            }.frame(width: 14, height: 14).help(status.rawValue).accessibilityHidden(true)
-                                        }
-                                    }.padding(.vertical, 9).padding(.horizontal, 10).frame(maxWidth: .infinity, alignment: .leading)
-                                }.buttonStyle(NavigationRowStyle(selected: session.id == store.selectedID))
-                                    .accessibilityLabel(session.title).accessibilityValue(status?.rawValue ?? "")
-                                Menu {
-                                    Button("Edit name") {
-                                        editingSessionID = session.id
-                                        editedName = session.title
-                                        showEditName = true
-                                    }
-                                    Button("Delete", role: .destructive) { store.deleteSession(session.id) }
-                                } label: {
-                                    Image(systemName: "ellipsis").frame(width: 24, height: 28)
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(ConversationDayGroup.grouped(store.sessions)) { group in
+                            Text(group.title(now: context.date))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.muted)
+                                .padding(.horizontal, 10)
+                                .padding(.top, 14)
+                                .padding(.bottom, 4)
+                                .accessibilityAddTraits(.isHeader)
+                            ForEach(group.sessions) { session in
+                                let status = store.sessionStatus(session)
+                                HStack(spacing: 0) {
+                                    Button { store.select(session.id) } label: {
+                                        HStack(alignment: .center, spacing: 8) {
+                                            Text(session.title).font(.system(size: 12))
+                                                .lineLimit(1).truncationMode(.tail)
+                                            Spacer(minLength: 0)
+                                            if let status {
+                                                Group {
+                                                    switch status {
+                                                    case .working: ProgressView().controlSize(.mini)
+                                                    case .done: Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.added)
+                                                    }
+                                                }.frame(width: 14, height: 14).help(status.rawValue).accessibilityHidden(true)
+                                            }
+                                        }.padding(.vertical, 9).padding(.horizontal, 10).frame(maxWidth: .infinity, alignment: .leading)
+                                    }.buttonStyle(NavigationRowStyle(selected: session.id == store.selectedID))
+                                        .accessibilityLabel(session.title).accessibilityValue(status?.rawValue ?? "")
                                 }
-                                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                                .help("Conversation actions")
-                                .accessibilityLabel("Actions for \(session.title)")
+                                    .contextMenu {
+                                        Button("Edit name") {
+                                            editingSessionID = session.id
+                                            editedName = session.title
+                                            showEditName = true
+                                        }
+                                        Button("Delete", role: .destructive) { store.deleteSession(session.id) }
+                                    }
+                                    .transition(reduceMotion ? .identity : .move(edge: .top).combined(with: .opacity))
                             }
-                                .transition(reduceMotion ? .identity : .move(edge: .top).combined(with: .opacity))
                         }
-                }.padding(.horizontal, 10)
+                    }.padding(.horizontal, 10)
+                }
             }
         }.background(Theme.panel)
         .alert("Edit name", isPresented: $showEditName) {

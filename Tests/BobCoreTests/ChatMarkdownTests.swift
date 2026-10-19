@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class ChatMarkdownTests: XCTestCase {
+    func testChatRemovesTrailingParagraphGapButKeepsInternalSpacing() throws {
+        let rendered = PlanMarkdownFormatter.render("First\n\nLast", compactEdges: true)
+        XCTAssertEqual(rendered.string, "First\nLast")
+        let first = try XCTUnwrap(rendered.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+        let last = try XCTUnwrap(rendered.attribute(.paragraphStyle, at: rendered.length - 1, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(first.paragraphSpacing, 10)
+        XCTAssertEqual(last.paragraphSpacing, 0)
+        XCTAssertTrue(PlanMarkdownFormatter.render("Last").string.hasSuffix("\n"))
+    }
+
+    func testTablesHaveOuterVerticalMarginsAndKeepTheirFinalParagraph() throws {
+        let markdown = "Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |"
+        let rendered = PlanMarkdownFormatter.render(markdown, compactEdges: true)
+        let cellRange = (rendered.string as NSString).range(of: "2")
+        let style = try XCTUnwrap(rendered.attribute(.paragraphStyle, at: cellRange.location, effectiveRange: nil) as? NSParagraphStyle)
+        let cell = try XCTUnwrap(style.textBlocks.first as? NSTextTableBlock)
+        XCTAssertEqual(cell.table.width(for: .margin, edge: .minY), 14)
+        XCTAssertEqual(cell.table.width(for: .margin, edge: .maxY), 14)
+        XCTAssertEqual(style.paragraphSpacing, 0)
+        XCTAssertTrue(rendered.string.hasSuffix("\n"))
+    }
+
     func testStreamingUpdatesRenderBeforeMarkdownIsComplete() throws {
         let view = ChatMarkdownTextView()
         view.update(markdown: "# Summary\n\n**Ready**\n\n```swift\nlet val")

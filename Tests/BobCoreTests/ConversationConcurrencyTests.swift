@@ -16,6 +16,12 @@ private actor HeldConversationModel: ModelTransport {
     }
 }
 
+private struct FailedConversationModel: ModelTransport {
+    func complete(messages: [ModelMessage], system: String, tools: [ToolDefinition], onText: @escaping (String) async -> Void) async throws -> ModelMessage {
+        throw BobError.message("Fixture failure")
+    }
+}
+
 private actor ApprovalConversationModel: ModelTransport {
     let path: String
     private var requested = false
@@ -58,6 +64,59 @@ private actor ApprovalConversationModel: ModelTransport {
         store.draft = prompt
         store.send(transport: model, reviewer: FixtureToolSafetyReviewer())
         return store.selectedID!
+    }
+
+    func testSelectingConversationRequestsComposerFocusIncludingReselection() throws {
+        let root = try workspace(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(projectPath: root.path, storageDirectory: root.appendingPathComponent("state"))
+        defer { store.shutdown() }
+        let first = try XCTUnwrap(store.selectedID)
+        let second = Session(projectPath: root.path)
+        store.sessions.append(second)
+        let initialRequest = store.composerFocusRequest
+
+        store.select(second.id)
+        let selectionRequest = try XCTUnwrap(store.composerFocusRequest)
+        XCTAssertEqual(store.selectedID, second.id)
+        XCTAssertNotEqual(selectionRequest, initialRequest)
+
+        store.select(second.id)
+        let reselectionRequest = try XCTUnwrap(store.composerFocusRequest)
+        XCTAssertNotEqual(reselectionRequest, selectionRequest)
+
+        store.select(first)
+        XCTAssertEqual(store.selectedID, first)
+        XCTAssertNotEqual(store.composerFocusRequest, reselectionRequest)
+    }
+
+    func testCompletionAlertsArePerSuccessfulRunIncludingBackgroundChats() async throws {
+        let root = try workspace(); defer { try? FileManager.default.removeItem(at: root) }
+        var alerts: [(UUID, UUID)] = []
+        let store = AppStore(projectPath: root.path, storageDirectory: root.appendingPathComponent("state"),
+                             completionAlert: { alerts.append(($0.id, $1)) })
+        defer { store.shutdown() }
+        let alpha = HeldConversationModel("Alpha "), beta = HeldConversationModel("Beta ")
+        let first = start(store, prompt: "First", model: alpha)
+        let second = start(store, prompt: "Second", model: beta)
+        await alpha.release()
+        try await waitUntil { !store.runningSessionIDs.contains(first) }
+        XCTAssertEqual(store.selectedID, second)
+        XCTAssertEqual(alerts.map { $0.0 }, [first])
+        await beta.release()
+        try await waitUntil { store.runningSessionIDs.isEmpty }
+        XCTAssertEqual(alerts.map { $0.0 }, [first, second])
+        XCTAssertEqual(Set(alerts.map { $0.1 }).count, 2)
+
+        _ = start(store, prompt: "Stop", model: HeldConversationModel("Waiting "))
+        store.stop()
+        try await waitUntil { store.runningSessionIDs.isEmpty }
+        _ = start(store, prompt: "Fail", model: FailedConversationModel())
+        try await waitUntil { store.runningSessionIDs.isEmpty }
+        XCTAssertTrue(store.selected?.messages.contains { $0.role == .error } == true)
+        _ = start(store, prompt: "Shutdown", model: HeldConversationModel("Waiting "))
+        store.shutdown()
+        try await waitUntil { store.runningSessionIDs.isEmpty }
+        XCTAssertEqual(alerts.count, 2, "Stopped, failed, and shutdown runs must not alert")
     }
 
     func testTwoChatsStreamIndependentlyAndFinishingOneLeavesOtherRunning() async throws {

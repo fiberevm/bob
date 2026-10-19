@@ -39,6 +39,17 @@ private actor MetricsEvents {
 }
 
 final class ChatMetricsCoreTests: XCTestCase {
+    func testDefaultContextBudgetIs300ThousandTokens() {
+        let manager = ContextManager()
+        XCTAssertEqual(manager.inputTokenBudget, 300_000)
+        let history = [ModelMessage(role: "assistant", text: "Previous work", usage: .init(inputTokens: 100_000, outputTokens: 100))]
+        let context = manager.usage(history)
+        XCTAssertEqual(context.budget, 300_000)
+        XCTAssertEqual(context.tokens, 100_100)
+        XCTAssertEqual(context.source, .localBudget)
+        XCTAssertLessThan(context.fraction ?? 1, 1)
+    }
+
     func testTitleGenerationReportsItsUsageWithoutEnteringChatContext() async throws {
         let events = MetricsEvents()
         let title = try await ConversationTitle.generate(for: "Inspect the parser", configuration: .init(provider: .compatible, model: "fixture", baseURL: "http://localhost", token: ""), transport: TitleMetricsModel(), onUsage: { record in

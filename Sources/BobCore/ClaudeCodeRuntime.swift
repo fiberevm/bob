@@ -162,6 +162,13 @@ private final class ClaudeCodeTurn {
                         "request": ["subtype": "interrupt"]])
     }
 
+    private static func userContent(_ messages: [ModelMessage]) -> Any {
+        if messages.allSatisfy({ ($0.images ?? []).isEmpty }) {
+            return messages.map(\.text).joined(separator: "\n\n")
+        }
+        return ModelClient.anthropicInput(messages).flatMap { $0["content"] as? [[String: Any]] ?? [] }
+    }
+
     private func applySteering(child: JSONLineProcess) async throws {
         history = ConversationHistory.repaired(history, uncertain: uncertain)
         if !streamed.isEmpty { history.append(.init(role: "assistant", text: streamed)) }
@@ -173,7 +180,7 @@ private final class ClaudeCodeTurn {
         redirecting = false
         usageID = UUID().uuidString
         messageUsage = [:]
-        try child.send(["type": "user", "message": ["role": "user", "content": updates.map(\.text).joined(separator: "\n\n")],
+        try child.send(["type": "user", "message": ["role": "user", "content": Self.userContent(updates)],
                         "parent_tool_use_id": NSNull(), "session_id": sessionID ?? "", "client_composed": true])
     }
 
@@ -192,13 +199,14 @@ private final class ClaudeCodeTurn {
             } else { prompt = history.last(where: { $0.role == "user" })?.text ?? "" }
             guard !prompt.isEmpty else { throw BobError.message("Claude Code needs a user message.") }
             await emit(.activity("Thinking"))
+            let latestImages = history.last(where: { $0.role == "user" })?.images ?? []
             let pending = input.takePending()
             if !pending.isEmpty {
                 history += pending
                 try await journal?.replace(history)
                 await emit(.history(history)); await emit(.steered)
             }
-            let combined = ([prompt] + pending.map(\.text)).joined(separator: "\n\n")
+            let combined = Self.userContent([ModelMessage(role: "user", text: prompt, images: latestImages)] + pending)
             try child.send(["type": "user", "message": ["role": "user", "content": combined], "parent_tool_use_id": NSNull(), "session_id": resume ?? "", "client_composed": true])
         case "control_request":
             guard let id = frame["request_id"] as? String, let request = frame["request"] as? [String: Any] else { throw BobError.message("Invalid Claude Code control request.") }

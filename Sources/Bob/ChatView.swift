@@ -1,37 +1,49 @@
 import SwiftUI
 import BobCore
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @ObservedObject var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var isComposerFocused: Bool
     @State private var flight: Message?
+    @State private var isImageDropTargeted = false
+    @State private var attachmentError: String?
+    @State private var loadingImages = false
     @State private var bubbleFrames: [UUID: CGRect] = [:]
     @State private var isFlying = false
     @State private var flightTimeout: Task<Void, Never>?
     @State private var composerDockHeight: CGFloat = 76
     private let padding: CGFloat = 16
-    private var canSend: Bool { !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.selected != nil }
+    private var canSend: Bool { (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.draftImages.isEmpty) && store.selected != nil && !loadingImages }
     private var showsThinkingIndicator: Bool {
-        guard store.isRunning, store.approval == nil else { return false }
+        guard store.isRunning, store.approval == nil, store.userInput == nil else { return false }
         if store.activity == "Compacting context" { return true }
         guard let last = store.selected?.messages.last else { return true }
         if let tool = last.tool { return tool.status != .running }
         return last.role != .assistant || last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+    private func isUserMessage(_ item: ChatTranscript.Item) -> Bool {
+        if case .message(let message) = item { return message.role == .user }
+        return false
+    }
+
     var body: some View {
         let transcript = ChatTranscript.items(from: store.selected?.messages ?? [])
         return GeometryReader { geometry in
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 FadingScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(transcript) { item in
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(transcript.enumerated()), id: \.element.id) { index, item in
+                            Group {
                             switch item {
                             case .message(let message):
                                 MessageView(message: message, auth: store.auth, userWidth: min(560, geometry.size.width * 0.78), hidesBubble: flight?.id == message.id)
                             case .tools(let group): ToolGroupView(group: group).transition(.opacity)
                             }
+                            }
+                            .padding(.top, index > 0 && (isUserMessage(item) || isUserMessage(transcript[index - 1])) ? 8 : 0)
                         }
                         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: transcript.compactMap { item -> UUID? in
                             if case .tools(let group) = item { return group.id }
@@ -70,9 +82,15 @@ struct ChatView: View {
                     if let request = store.approval {
                         approvalCard(request).clipShape(RoundedRectangle(cornerRadius: 16))
                     }
+                    if let request = store.userInput {
+                        UserInputCard(request: request).id(request.id)
+                    }
+                    attachmentTray
                     composer
                 }
                 .padding(.horizontal, padding).padding(.top, 8).padding(.bottom, padding)
+                // An overlay must follow the pane width, not the draft's ideal width.
+                .frame(width: geometry.size.width)
                 .background {
                     GeometryReader { proxy in
                         Color.clear.preference(key: ComposerDockHeight.self, value: proxy.size.height)
@@ -123,7 +141,7 @@ struct ChatView: View {
         store.send()
     }
     private func beginFlight(_ message: Message) {
-        guard !reduceMotion else { return }
+        guard !reduceMotion, (message.images ?? []).isEmpty else { return }
         finishFlight()
         flight = message
         // A missing lazy-layout anchor must never leave a message hidden.
@@ -144,13 +162,58 @@ struct ChatView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
+    @ViewBuilder private var attachmentTray: some View {
+        if !store.draftImages.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(store.draftImages) { attachment in
+                        Image(nsImage: attachment.preview)
+                            .resizable().scaledToFill().frame(width: 76, height: 76).clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .overlay(alignment: .topTrailing) {
+                                Button { store.draftImages.removeAll { $0.id == attachment.id } } label: {
+                                    Image(systemName: "xmark.circle.fill").font(.system(size: 18))
+                                        .symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.7))
+                                }.buttonStyle(.plain).padding(4).accessibilityLabel("Remove image attachment")
+                            }
+                    }
+                }.padding(4)
+            }.frame(height: 84)
+        }
+        if loadingImages { ProgressView("Adding images…").controlSize(.small) }
+        if let attachmentError {
+            HStack {
+                Text(attachmentError).font(.system(size: 11)).foregroundStyle(Theme.warning)
+                Button { self.attachmentError = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+            }
+        }
+    }
+    private func acceptImages(_ providers: [NSItemProvider]) -> Bool {
+        guard !loadingImages, store.selectedID != nil else { return false }
+        let sessionID = store.selectedID
+        loadingImages = true
+        attachmentError = nil
+        Task { @MainActor in
+            defer { loadingImages = false }
+            for provider in providers {
+                guard store.selectedID == sessionID else { break }
+                guard store.draftImages.count < 8 else { attachmentError = "Attach up to 8 images per message."; break }
+                do {
+                    let attachment = try await PromptAttachment.load(provider)
+                    guard store.selectedID == sessionID else { break }
+                    store.draftImages.append(attachment)
+                } catch { attachmentError = error.localizedDescription }
+            }
+        }
+        return true
+    }
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 12) {
             TextField("Message", text: $store.draft, axis: .vertical)
                 .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...8)
                 .focused($isComposerFocused)
                 .onSubmit { submit() }
-                .frame(maxWidth: .infinity, minHeight: 32)
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 32)
                 .accessibilityLabel("Message to agent")
                 .anchorPreference(key: ChatAnchors.self, value: .bounds) { ChatAnchorValues(composer: $0) }
             if store.isRunning {
@@ -163,11 +226,14 @@ struct ChatView: View {
                     .buttonStyle(.plain).background(canSend ? Theme.accent : Theme.raised, in: Circle())
                     .foregroundStyle(canSend ? Theme.onAccent : Theme.muted)
                     .keyboardShortcut(.return, modifiers: .command).disabled(!canSend)
-                    .accessibilityLabel(store.isRunning ? "Steer agent" : "Send message").help(store.isRunning ? "Steer current task · ⌘Return" : "Send · ⌘Return")
+                    .accessibilityLabel(store.isRunning ? "Send follow-up" : "Send message").help(store.isRunning ? "Send follow-up · ⌘Return" : "Send · ⌘Return")
             }
         }.padding(.leading, 20).padding(.trailing, 10).padding(.vertical, 10)
             .foregroundStyle(Theme.text)
             .modifier(FloatingGlass(cornerRadius: 26))
+            .overlay { RoundedRectangle(cornerRadius: 26).stroke(Theme.accent, lineWidth: isImageDropTargeted ? 2 : 0).allowsHitTesting(false) }
+            .onDrop(of: [UTType.image.identifier, UTType.fileURL.identifier], isTargeted: $isImageDropTargeted, perform: acceptImages)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: store.draft)
     }
     private func approvalCard(_ request: ApprovalRequest) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -193,7 +259,15 @@ private struct MessageView: View {
         if message.role == .user {
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                UserBubble(text: message.text)
+                VStack(alignment: .trailing, spacing: 8) {
+                    ForEach(Array((message.images ?? []).enumerated()), id: \.offset) { _, image in
+                        if let preview = NSImage(data: image.data) {
+                            Image(nsImage: preview).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 180)
+                                .clipShape(RoundedRectangle(cornerRadius: 12)).accessibilityLabel("Attached image")
+                        }
+                    }
+                    UserBubble(text: message.text)
+                }
                     .opacity(hidesBubble ? 0 : 1)
                     .background { GeometryReader { geometry in Color.clear.preference(key: RenderedBubbleFrames.self, value: [message.id: geometry.frame(in: .named("chat"))]) } }
                     .frame(maxWidth: userWidth, alignment: .trailing)

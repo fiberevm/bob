@@ -47,16 +47,16 @@ struct WorkspaceStatusBar: View {
                     .accessibilityValue(context.fraction.map { "\(Int($0 * 100)) percent" } ?? "Context limit unavailable")
                     .popover(isPresented: $showsContext, arrowEdge: .top) { contextDetails }
                 HStack(spacing: 10) {
-                    Label("Sent \(tokenUsage.map { $0.inputTokens.formatted(.number.notation(.compactName)) } ?? "—")", systemImage: "arrow.up")
-                    Label("Downloaded \(tokenUsage.map { $0.outputTokens.formatted(.number.notation(.compactName)) } ?? "—")", systemImage: "arrow.down")
+                    Label("\(tokenUsage.map { $0.inputTokens.formatted(.number.notation(.compactName)) } ?? "—")", systemImage: "arrow.up")
+                    Label("\(tokenUsage.map { $0.outputTokens.formatted(.number.notation(.compactName)) } ?? "—")", systemImage: "arrow.down")
                 }.monospacedDigit().fixedSize()
                     .help(tokenUsage.map { "This chat: \($0.inputTokens.formatted()) input tokens sent · \($0.outputTokens.formatted()) output tokens received. Includes repeated input context and compaction; counts update when the provider reports usage." } ?? "The provider has not reported token usage for this chat.")
                     .accessibilityLabel("Selected chat token totals")
                     .accessibilityValue(tokenUsage.map { "\($0.inputTokens) input tokens, \($0.outputTokens) output tokens" } ?? "Not reported")
             }
             Button { showsUsage = true } label: {
-                Label("Usage", systemImage: "chart.bar")
-            }.help("Account limits and current chat usage")
+                WeeklyUsageLabel(usage: store.connections.usage, account: store.selectedProvider == .chatgpt ? store.auth.selected : nil)
+            }.help("Weekly allowance remaining · click for account limits")
                 .popover(isPresented: $showsUsage, arrowEdge: .top) {
                     UsagePopover(store: store) {
                         showsUsage = false
@@ -92,13 +92,7 @@ struct WorkspaceStatusBar: View {
                      : "Context uses the latest response's input and output, including cached input. Claude manages compaction; a provider-reported context window is shown when available.")
                     .foregroundStyle(Theme.secondary)
             }
-            Divider()
-            if let usage = tokenUsage {
-                LabeledContent("Tokens sent ↑", value: usage.inputTokens.formatted())
-                LabeledContent("Tokens downloaded ↓", value: usage.outputTokens.formatted())
-            }
-            Text("Chat totals count reported tokens across requests, including repeated input, chat titles, and compaction. They survive context summaries and restarts. Unreported usage is not estimated.")
-                .foregroundStyle(Theme.secondary)
+
         }.font(.system(size: 11)).padding(18).frame(width: 320, alignment: .leading)
             .foregroundStyle(Theme.text).background(Theme.panel)
     }
@@ -116,6 +110,31 @@ private struct StatusBarButtonStyle: ButtonStyle {
             configuration.label.padding(.horizontal, 5).frame(height: 26)
                 .background(.white.opacity(configuration.isPressed ? 0.22 : hovering ? 0.12 : 0))
                 .contentShape(Rectangle()).onHover { hovering = $0 }
+        }
+    }
+}
+
+private struct WeeklyUsageLabel: View {
+    @ObservedObject var usage: AccountUsageStore
+    let account: ChatGPTAccount?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { timeline in
+            let remaining = account == nil ? nil : usage.snapshot?.buckets
+                .flatMap(\.windows)
+                .filter { $0.windowDurationMins == 10080 }
+                .compactMap { $0.remainingPercent(at: timeline.date) }
+                .min()
+            Label(remaining.map { "\($0.formatted(.number.precision(.fractionLength(0...1))))% left this week" } ?? "—% left this week",
+                  systemImage: "chart.bar")
+                .monospacedDigit()
+        }
+        .task(id: account?.id) {
+            guard let account else { return }
+            while !Task.isCancelled {
+                await usage.refresh(account: account)
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            }
         }
     }
 }

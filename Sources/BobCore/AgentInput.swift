@@ -14,12 +14,17 @@ public final class AgentInput: @unchecked Sendable {
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         notifications = stream.stream; signal = stream.continuation
     }
-    public func send(_ text: String, id: UUID = UUID()) {
+    public func send(_ text: String, id: UUID = UUID(), images: [ModelImage] = []) {
         lock.lock()
-        pending.append(.init(role: "user", text: text, userMessageID: id)); submitted.append(text)
+        pending.append(.init(role: "user", text: text, images: images, userMessageID: id)); submitted.append(text)
         let cancel = interrupt?.cancel
         lock.unlock()
         cancel?(); signal.yield(())
+    }
+    /// Explicit form answers are trusted user input, not steering messages.
+    public func recordAnswer(_ text: String) {
+        lock.lock(); defer { lock.unlock() }
+        submitted.append(text)
     }
     public var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return !pending.isEmpty }
     public var userMessages: [String] { lock.lock(); defer { lock.unlock() }; return submitted }

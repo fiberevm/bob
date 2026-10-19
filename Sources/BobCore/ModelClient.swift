@@ -153,7 +153,7 @@ public struct ModelClient: ModelTransport {
             let code = (object?["error"] as? [String: Any])?["code"] as? String ?? ""
             let type = (object?["error"] as? [String: Any])?["type"] as? String ?? ""
             let quota = ["insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded"].contains(code) || type == "insufficient_quota"
-            throw ModelHTTPError(message: "\(configuration.provider.title) HTTP \(http.statusCode): \(detail)", retryable: [408, 429, 500, 502, 503, 504].contains(http.statusCode) && !quota, retryAfter: RetryPolicy.retryAfter(http.value(forHTTPHeaderField: "Retry-After")))
+            throw ModelHTTPError(message: "\(configuration.provider.title) HTTP \(http.statusCode): \(detail)", retryable: [401, 408, 429, 500, 502, 503, 504].contains(http.statusCode) && !quota, retryAfter: RetryPolicy.retryAfter(http.value(forHTTPHeaderField: "Retry-After")))
         }
         var accumulator = ModelStreamAccumulator(provider: configuration.provider)
         var parser = SSEParser(), line = Data()
@@ -185,7 +185,10 @@ public struct ModelClient: ModelTransport {
                 let output: Any = (message.images ?? []).isEmpty ? message.text : [["type": "input_text", "text": message.text]] + (message.images ?? []).map { ["type": "input_image", "image_url": $0.dataURL, "detail": "original"] }
                 result.append(["type": "function_call_output", "call_id": message.toolCallID ?? "", "output": output])
             } else {
-                if !message.text.isEmpty { result.append(["role": message.role, "content": message.text]) }
+                if !(message.images ?? []).isEmpty {
+                    let content: [[String: Any]] = [["type": "input_text", "text": message.text]] + (message.images ?? []).map { ["type": "input_image", "image_url": $0.dataURL] }
+                    result.append(["role": message.role, "content": content])
+                } else if !message.text.isEmpty { result.append(["role": message.role, "content": message.text]) }
                 result += message.toolCalls.map { ["type": "function_call", "call_id": $0.id, "name": $0.name, "arguments": $0.arguments] }
             }
         }
@@ -203,8 +206,11 @@ public struct ModelClient: ModelTransport {
             if !message.toolCalls.isEmpty {
                 object["tool_calls"] = message.toolCalls.map { ["id": $0.id, "type": "function", "function": ["name": $0.name, "arguments": $0.arguments]] as [String: Any] }
             }
+            if message.role == "user", let images = message.images, !images.isEmpty {
+                object["content"] = [["type": "text", "text": message.text]] + images.map { ["type": "image_url", "image_url": ["url": $0.dataURL]] as [String: Any] }
+            }
             result.append(object)
-            for image in message.images ?? [] {
+            for image in message.role == "tool" ? (message.images ?? []) : [] {
                 pendingImages += [["type": "text", "text": "Screenshot returned by tool \(message.toolCallID ?? "observation"):"], ["type": "image_url", "image_url": ["url": image.dataURL]]]
             }
         }
@@ -222,6 +228,7 @@ public struct ModelClient: ModelTransport {
             }
             else {
                 if !message.text.isEmpty { blocks.append(["type": "text", "text": message.text]) }
+                blocks += (message.images ?? []).map { ["type": "image", "source": ["type": "base64", "media_type": $0.mimeType, "data": $0.data.base64EncodedString()]] }
                 for call in message.toolCalls {
                     let input = (try? JSONSerialization.jsonObject(with: Data(call.arguments.utf8))) ?? [:]
                     blocks.append(["type": "tool_use", "id": call.id, "name": call.name, "input": input])

@@ -51,6 +51,14 @@ public enum ChatTranscript {
                 activity.review = reviews[call.id]
                 activity.finish(output: output, failed: output.hasPrefix("Tool error:"), cancelled: output.hasPrefix("Interrupted") || output.hasPrefix("Aborted"))
                 messages.append(Message(role: .activity, text: "", tool: activity))
+                if call.name == "request_user_input",
+                   let request = try? JSONDecoder().decode(UserInputQuestions.self, from: Data(call.arguments.utf8)),
+                   (try? request.validate()) != nil,
+                   let response = try? JSONDecoder().decode(UserInputResponse.self, from: Data(output.utf8)),
+                   response.answers.values.allSatisfy({ $0.answers.count == 1 }),
+                   (try? request.response(response.answers.mapValues { $0.answers[0] })) != nil {
+                    messages.append(Message(role: .user, text: request.transcript(response)))
+                }
                 for child in delegatedTools where child.parentCallID == call.id {
                     messages.append(Message(role: .activity, text: "", tool: child))
                 }

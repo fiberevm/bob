@@ -3,6 +3,50 @@ import XCTest
 @testable import Bob
 
 @MainActor final class WorkspaceSplitViewTests: XCTestCase {
+    func testEditorTerminalTogglePreservesShellAndEditor() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bob-terminal-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("original".utf8).write(to: root.appendingPathComponent("file.swift"))
+        let store = AppStore(projectPath: root.path, storageDirectory: root.appendingPathComponent("state"))
+        defer { store.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let editorID = try await store.openFileTab("file.swift")
+        store.editorText = "unsaved"
+        XCTAssertFalse(store.showEditorTerminal)
+        store.openPanel(.changes)
+
+        store.toggleEditorTerminal()
+        XCTAssertTrue(store.showEditorTerminal)
+        XCTAssertEqual(store.selectedTabID, editorID)
+        XCTAssertEqual(store.editorText, "unsaved")
+        XCTAssertTrue(store.terminal.running)
+        XCTAssertEqual(store.terminal.directory, root.path)
+        XCTAssertFalse(store.openTabs.contains { $0.kind == .terminal })
+        store.terminal.send("export BOB_TOGGLE_TEST=preserved\n")
+        store.toggleEditorTerminal()
+        XCTAssertFalse(store.showEditorTerminal)
+        XCTAssertTrue(store.terminal.running)
+        XCTAssertNotNil(store.editorFocusRequest)
+        store.toggleEditorTerminal()
+        store.terminal.send("echo shell-$BOB_TOGGLE_TEST\n")
+        for _ in 0..<100 {
+            if store.terminal.output.contains("shell-preserved") { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(store.terminal.output.contains("shell-preserved"))
+        XCTAssertTrue(store.editorDirty)
+        XCTAssertEqual(store.selectedTabID, editorID)
+    }
+
+    func testEditorTerminalDoesNotStartWithoutProject() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bob-no-terminal-\(UUID())")
+        let store = AppStore(projectPath: "", storageDirectory: root)
+        defer { store.shutdown(); try? FileManager.default.removeItem(at: root) }
+        store.toggleEditorTerminal()
+        XCTAssertFalse(store.showEditorTerminal)
+        XCTAssertFalse(store.terminal.running)
+    }
+
     func testNativeSidebarStaysOpenWhenResizedAndAfterClosingItsLastTab() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("bob-sidebar-\(UUID())")

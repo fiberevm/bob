@@ -50,7 +50,7 @@ final class ChatMarkdownTextView: NSTextView {
         guard self.markdown != markdown else { return }
         self.markdown = markdown
         let selection = selectedRanges
-        textStorage?.setAttributedString(PlanMarkdownFormatter.render(markdown))
+        textStorage?.setAttributedString(PlanMarkdownFormatter.render(markdown, compactEdges: true))
         // Preserve a user's selection while the response continues to grow.
         selectedRanges = selection.filter { NSMaxRange($0.rangeValue) <= (string as NSString).length }
         invalidateIntrinsicContentSize()

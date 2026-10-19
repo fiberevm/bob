@@ -19,14 +19,16 @@ import BobCore
     private var allowedComputerApps = Set<String>()
     private var accessRevision = -1
     private let approvals: ApprovalCoordinator
+    private let questions: UserInputCoordinator?
     private let policy = PermissionPolicy()
     private let rootInstructions: String
     private let surfaces: AgentSurfaceAccess?
     private var delivered: Set<String>
     private var staged = Set<String>()
-    init(files: WorkspaceFiles, project: String, browser: (any AgentBrowser)?, computer: (any AgentComputer)? = nil, workspace: (any AgentWorkspace)? = nil, workspaceSessionID: UUID? = nil, decisions: LocalDecisionModel? = LocalDecisions.model, reviewer: (any ToolSafetyReviewing)? = nil, navigationModel: (any DecisionEvaluating)? = nil, onDelegatedTool: @escaping (ToolActivity) async throws -> Void = { _ in }, trustedUserMessages: [String] = [], approvals: ApprovalCoordinator, rootInstructions: String, surfaces: AgentSurfaceAccess? = nil, input: AgentInput = AgentInput()) {
+    init(files: WorkspaceFiles, project: String, browser: (any AgentBrowser)?, computer: (any AgentComputer)? = nil, workspace: (any AgentWorkspace)? = nil, workspaceSessionID: UUID? = nil, decisions: LocalDecisionModel? = LocalDecisions.model, reviewer: (any ToolSafetyReviewing)? = nil, navigationModel: (any DecisionEvaluating)? = nil, onDelegatedTool: @escaping (ToolActivity) async throws -> Void = { _ in }, trustedUserMessages: [String] = [], approvals: ApprovalCoordinator, questions: UserInputCoordinator? = nil, rootInstructions: String, surfaces: AgentSurfaceAccess? = nil, input: AgentInput = AgentInput()) {
         self.files = files; self.project = project; self.browser = browser; self.computer = computer; self.workspace = workspace; self.approvals = approvals
         self.workspaceSessionID = workspaceSessionID
+        self.questions = questions
         self.rootInstructions = rootInstructions
         self.surfaces = surfaces
         self.decisions = decisions
@@ -38,7 +40,7 @@ import BobCore
         delivered = [rootInstructions, ""]
     }
     var registry: ToolRegistry {
-        let definitions = WorkspaceTools.definitions + (browser == nil ? [] : BrowserTools.definitions) + (computer == nil ? [] : ComputerTools.definitions) + (workspace == nil ? [] : WorkspaceTabTools.definitions) + (decisions == nil ? [] : LocalDecisions.definitions)
+        let definitions = (questions == nil ? [] : [UserInputQuestions.definition]) + WorkspaceTools.definitions + (browser == nil ? [] : BrowserTools.definitions) + (computer == nil ? [] : ComputerTools.definitions) + (workspace == nil ? [] : WorkspaceTabTools.definitions) + (decisions == nil ? [] : LocalDecisions.definitions)
         return ToolRegistry(definitions: definitions, beforeSampling: { await self.didDeliverInstructions() }, afterCompaction: { await self.resetInstructions() }, review: { call, history in
             guard let definition = definitions.first(where: { $0.name == call.name }) else { throw BobError.message("Unknown tool.") }
             return try await self.review(call, definition: definition, history: history)
@@ -199,6 +201,15 @@ import BobCore
         return accepted
     }
     private func execute(_ call: ToolCall) async throws -> String {
+        if call.name == "request_user_input" {
+            guard let questions else { throw BobError.message("User questions are unavailable in this run.") }
+            let request = try JSONDecoder().decode(UserInputQuestions.self, from: Data(call.arguments.utf8))
+            let response = try await questions.request(callID: call.id, questions: request)
+            try Task.checkCancellation()
+            try input.checkPending()
+            guard let response else { return "The user dismissed the questions without answering. No choice was selected. Ask in chat if necessary; do not assume consent." }
+            return String(decoding: try JSONEncoder().encode(response), as: UTF8.self)
+        }
         if call.name == "browser_delegate" { return try await delegateBrowser(call) }
         if call.name == "local_decide" {
             guard let decisions else { throw BobError.message("Set up Clef-flash with make decisions first.") }

@@ -15,31 +15,113 @@ struct EditorView: View {
 
 struct ChangesView: View {
     @ObservedObject var store: AppStore
+    @State private var selectedPath: String?
+    @State private var refreshID = UUID()
+
+    private var selectedChange: GitFileChange? {
+        store.git.changes.first { $0.path == selectedPath } ?? store.git.changes.first
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if store.git.isRepository {
-            HStack {
-                Spacer()
-                Button("Refresh") { store.refresh() }
-                Button("Review") { store.reviewChanges() }.disabled(!store.git.isRepository)
-            }.font(.system(size: 11)).padding(.horizontal, 18).frame(height: 39).background(Theme.panel)
-                .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+                HStack {
+                    Text("Changes").foregroundStyle(Theme.secondary)
+                    Text("\(store.git.changes.count)").foregroundStyle(Theme.muted)
+                    Spacer()
+                    Button("Refresh") { store.refresh() }
+                    Button("Review") { store.reviewChanges() }
+                }.font(.system(size: 11)).padding(.horizontal, 18).frame(height: 39).background(Theme.panel)
+                    .overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
             }
             if !store.git.isRepository {
                 EmptyPanel(title: "No Git repository")
-            } else if store.git.diff.isEmpty {
-                EmptyPanel(title: store.git.status.isEmpty ? "No changes" : "No tracked changes")
+            } else if store.git.changes.isEmpty {
+                EmptyPanel(title: "No changes")
             } else {
-                FadingScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(store.git.diff.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                            Text(line.isEmpty ? " " : line).font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(line.hasPrefix("+") ? Theme.added : line.hasPrefix("-") ? Theme.removed : line.hasPrefix("@@") ? Theme.accent : Theme.secondary)
-                                .padding(.vertical, 2).padding(.horizontal, 18).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(line.hasPrefix("+") ? Theme.added.opacity(0.07) : line.hasPrefix("-") ? Theme.removed.opacity(0.07) : .clear)
-                        }
-                    }.padding(.vertical, 16).textSelection(.enabled)
+                HSplitView {
+                    FadingScrollView {
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            ForEach(store.git.changes, id: \.path) { change in
+                                Button { selectedPath = change.path } label: {
+                                    HStack(spacing: 7) {
+                                        FileIcon(path: change.path)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(URL(fileURLWithPath: change.path).lastPathComponent)
+                                                .foregroundStyle(Theme.text)
+                                            Text(relativePath(change.path)).font(.system(size: 10))
+                                                .foregroundStyle(Theme.muted)
+                                        }.lineLimit(1).truncationMode(.middle)
+                                        Spacer(minLength: 0)
+                                        Text(change.kind.badge).foregroundStyle(change.kind.color)
+                                            .help(change.kind.label)
+                                    }.font(.system(size: 12)).padding(8).contentShape(Rectangle())
+                                }.buttonStyle(NavigationRowStyle(selected: selectedChange?.path == change.path))
+                                    .help(relativePath(change.path))
+                                    .accessibilityLabel(relativePath(change.path))
+                                    .accessibilityValue(change.kind.label)
+                                    .accessibilityAddTraits(selectedChange?.path == change.path ? .isSelected : [])
+                            }
+                        }.padding(6)
+                    }.frame(minWidth: 170, idealWidth: 240, maxWidth: 340).background(Theme.panel)
+                    if let change = selectedChange {
+                        ChangedFileDetail(store: store, change: change, refreshID: refreshID)
+                            .id(change.path)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
+            }
+        }.onReceive(store.$git) { _ in refreshID = UUID() }
+    }
+
+    private func relativePath(_ path: String) -> String {
+        path.hasPrefix(store.projectPath + "/") ? String(path.dropFirst(store.projectPath.count + 1)) : path
+    }
+}
+
+private struct ChangedFileDetail: View {
+    @ObservedObject var store: AppStore
+    let change: GitFileChange
+    let refreshID: UUID
+    @State private var diff: FileDiff?
+    @State private var before = ""
+    @State private var after = ""
+    @State private var error: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(change.path.replacingOccurrences(of: store.projectPath + "/", with: ""))
+                    .lineLimit(1).truncationMode(.middle).help(change.path)
+                Spacer()
+                if let diff {
+                    Text("+\(diff.addedCount)").foregroundStyle(Theme.added)
+                    Text("−\(diff.removedCount)").foregroundStyle(Theme.removed)
+                }
+            }.font(.system(size: 11)).padding(.horizontal, 12).frame(height: 39)
+                .background(Theme.panel).overlay(alignment: .bottom) { Theme.line.frame(height: 1) }
+            if let error {
+                EmptyPanel(title: error)
+            } else if let diff {
+                if diff.lines.isEmpty {
+                    EmptyPanel(title: change.kind == .renamed ? "File renamed; contents unchanged" :
+                               change.kind == .added || change.kind == .untracked ? "New empty file" : "No content changes")
+                } else {
+                    FileDiffView(diff: diff, path: change.path, before: before, after: after)
+                }
+            } else {
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }.task(id: refreshID) {
+            diff = nil; error = nil
+            do {
+                let current = change.kind == .deleted ? "" : try await store.fileService(path: store.projectPath).read(change.path)
+                let original = try await store.comparisonBase(for: change.path, fallback: current)
+                let result = try await FileDiff.compare(before: original.text, after: current)
+                try Task.checkCancellation()
+                before = original.text; after = current; diff = result
+            } catch is CancellationError {} catch {
+                self.error = error.localizedDescription
             }
         }
     }

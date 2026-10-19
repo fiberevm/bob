@@ -102,6 +102,7 @@ import BobCore
 
 struct TerminalTextView: NSViewRepresentable {
     @ObservedObject var session: TerminalSession
+    var focusOnOpen = false
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true; scroll.drawsBackground = false
@@ -114,6 +115,12 @@ struct TerminalTextView: NSViewRepresentable {
         text.textContainer?.widthTracksTextView = true
         text.onInput = { [weak session] in session?.send($0) }
         scroll.documentView = text
+        if focusOnOpen {
+            DispatchQueue.main.async { [weak text] in
+                guard let text, let window = text.window, window.isKeyWindow else { return }
+                window.makeFirstResponder(text)
+            }
+        }
         return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {

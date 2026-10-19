@@ -74,7 +74,7 @@ struct PlanMarkdownView: NSViewRepresentable {
         var content: AttributedString
     }
 
-    static func render(_ markdown: String) -> NSAttributedString {
+    static func render(_ markdown: String, compactEdges: Bool = false) -> NSAttributedString {
         guard let parsed = try? AttributedString(markdown: markdown) else {
             return NSAttributedString(string: markdown, attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor])
         }
@@ -152,6 +152,9 @@ struct PlanMarkdownView: NSViewRepresentable {
                 let table = tables[tableIntent.identity] ?? NSTextTable()
                 table.numberOfColumns = columns.count
                 table.collapsesBorders = true
+                // Outer table margins leave cell padding and row spacing unchanged.
+                table.setWidth(14, type: .absoluteValueType, for: .margin, edge: .minY)
+                table.setWidth(14, type: .absoluteValueType, for: .margin, edge: .maxY)
                 tables[tableIntent.identity] = table
                 let row = block.intent.compactMap { component -> Int? in
                     if case .tableRow(let index) = component.kind { return index }; return nil
@@ -168,6 +171,17 @@ struct PlanMarkdownView: NSViewRepresentable {
             if !value.string.hasSuffix("\n") { value.append(NSAttributedString(string: "\n", attributes: [.font: font, .foregroundColor: color])) }
             value.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: value.length))
             result.append(value)
+        }
+        if compactEdges, result.length > 0,
+           let last = result.attribute(.paragraphStyle, at: result.length - 1, effectiveRange: nil) as? NSParagraphStyle,
+           last.textBlocks.isEmpty {
+            // The transcript owns the gap after a message, not the final paragraph.
+            if result.string.hasSuffix("\n") { result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1)) }
+            if result.length > 0, let style = last.mutableCopy() as? NSMutableParagraphStyle {
+                style.paragraphSpacing = 0
+                let range = (result.string as NSString).paragraphRange(for: NSRange(location: result.length - 1, length: 0))
+                result.addAttribute(.paragraphStyle, value: style, range: range)
+            }
         }
         return result
     }

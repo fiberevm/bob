@@ -6,12 +6,26 @@ import BobCore
 
 @MainActor final class AppStore: ObservableObject {
     @Published var sessions: [Session] = []
-    @Published var selectedID: UUID? { didSet { if oldValue != selectedID { scheduleSave() } } }
+    @Published var selectedID: UUID? {
+        didSet {
+            guard oldValue != selectedID else { return }
+            draft = selected?.promptDraft ?? ""
+            draftImages = []
+            scheduleSave()
+        }
+    }
     var settings: ProviderSettings {
         get { connections.settings }
         set { connections.settings = newValue }
     }
-    @Published var draft = ""
+    @Published var draft = "" {
+        didSet {
+            guard oldValue != draft, let index = sessions.firstIndex(where: { $0.id == selectedID }) else { return }
+            sessions[index].promptDraft = draft.isEmpty ? nil : draft
+            scheduleSave()
+        }
+    }
+    @Published var draftImages: [PromptAttachment] = []
     @Published private(set) var composerFocusRequest: UUID?
     @Published private(set) var lastCreatedSessionID: UUID?
     @Published private(set) var lastSubmittedMessage: Message?
@@ -20,12 +34,22 @@ import BobCore
     // Composer, model menus, and Stop always describe the selected chat.
     var isRunning: Bool { selectedID.map { runs[$0] != nil } ?? false }
     var runningSessionIDs: Set<UUID> { Set(runs.keys) }
+    /// All live chats, including those not selected in this project window.
+    var runningChatActivities: [RunningChatActivity] {
+        sessions.compactMap { session in
+            guard let run = runs[session.id] else { return nil }
+            return RunningChatActivity(id: session.id, title: session.title,
+                                       activity: run.activity, needsApproval: run.approval != nil || run.userInput != nil)
+        }
+    }
     @Published private var workspaceActivity = "Ready"
     var activity: String { selectedID.flatMap { runs[$0]?.activity } ?? workspaceActivity }
     var approval: ApprovalRequest? { selectedID.flatMap { runs[$0]?.approval } }
+    var userInput: UserInputRequest? { selectedID.flatMap { runs[$0]?.userInput } }
     @Published var error: String?
     @Published var showSettings = false
     var showWorkspacePanel: Bool { !boundProjectPath.isEmpty }
+    @Published private(set) var showEditorTerminal = false
     @Published var showPalette = false
     var paletteScope: CommandPaletteScope = .all
     @Published private(set) var openTabs: [WorkspaceTab] = []
@@ -36,6 +60,7 @@ import BobCore
     let commandPalette = CommandPaletteModel()
     @Published private(set) var isMutatingFiles = false
     private var fileMutationGeneration = UUID()
+    private let completionAlert: @MainActor (Session, UUID) -> Void
     private let trashItem: WorkspaceTrashHandler
     @Published var git = GitState()
     @Published var checkpoints: [FileCheckpoint] = [] {
@@ -76,13 +101,21 @@ import BobCore
         let id: UUID
         let input = AgentInput()
         var waitingForSteering = false
+        var followUps: [Message] = []
+        var routingTask: Task<Void, Never>?
+        var routingGeneration = 0
         var task: Task<Void, Never>?
         var activity = "Connecting"
         var approval: ApprovalRequest?
+        var userInput: UserInputRequest?
         var pendingText = ""
         var textTask: Task<Void, Never>?
         var messageID: UUID?
         init(id: UUID, harness: AgentHarness) { self.id = id; self.harness = harness; messageID = id }
+    }
+    /// Injectable for deterministic routing tests. Nil preserves immediate steering.
+    var followUpRouter: (([ModelMessage], String) async throws -> FollowUpDisposition)? = LocalDecisions.model.map { model in
+        { history, message in try await FollowUpDecision.decide(model: model, history: history, message: message) }
     }
     private var saveTask: Task<Void, Never>?
     private var projectTask: Task<Void, Never>?
@@ -105,6 +138,7 @@ import BobCore
     }
     var selectedChatActivity: String? {
         guard isRunning else { return nil }
+        if userInput != nil { return "Answer needed" }
         return approval != nil ? "Approval needed" : activity
     }
     enum SessionStatus: String { case working = "Working", done = "Done" }
@@ -157,7 +191,9 @@ import BobCore
     }
 
     init(projectPath: String = "", storageDirectory: URL? = nil, connections: ConnectionPreferences? = nil,
-         trashItem: @escaping WorkspaceTrashHandler = WorkspaceFiles.systemTrash) {
+         trashItem: @escaping WorkspaceTrashHandler = WorkspaceFiles.systemTrash,
+         completionAlert: @escaping @MainActor (Session, UUID) -> Void = { ConversationCompletionAlerts.shared.post(session: $0, runID: $1) }) {
+        self.completionAlert = completionAlert
         self.trashItem = trashItem
         self.connections = connections ?? .shared
         if let storageDirectory { dataDirectory = storageDirectory }
@@ -188,7 +224,7 @@ import BobCore
                 let originalUser = sessions[index].messages[..<assistant].last { $0.role == .user }
                 let applied = Set(recovered.history.compactMap(\.userMessageID))
                 let pending = sessions[index].messages.dropFirst(assistant).filter { $0.isSteering == true && !applied.contains($0.id) }
-                let history = recovered.history + pending.map { ModelMessage(role: "user", text: $0.text, userMessageID: $0.id) }
+                let history = recovered.history + pending.map { ModelMessage(role: "user", text: $0.text, images: $0.images ?? [], userMessageID: $0.id) }
                 sessions[index].turns = history
                 if needsRestore {
                     let notices = sessions[index].messages.dropFirst(assistant).filter { $0.role == .error || ($0.role == .activity && $0.tool == nil) }
@@ -202,6 +238,7 @@ import BobCore
         if sessions.isEmpty {
             if !boundProjectPath.isEmpty { let session = Session(projectPath: boundProjectPath); sessions = [session]; selectedID = session.id }
         }
+        draft = selected?.promptDraft ?? ""
         connectionsObservation = self.connections.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         if !boundProjectPath.isEmpty {
             var recent = UserDefaults.standard.stringArray(forKey: "projects.recent") ?? []
@@ -232,9 +269,11 @@ import BobCore
         guard let current = selected, !isRunning else { return }
         if current.provider != provider && (!current.messages.isEmpty || !current.turns.isEmpty) {
             let prompt = draft
+            let attachments = draftImages
             newSession(provider: provider)
             guard selectedID != current.id else { return }
             draft = prompt
+            draftImages = attachments
         }
         guard let id = selectedID else { return }
         mutate(id) { $0.provider = provider; $0.model = model.id; $0.contextUsage = nil }
@@ -258,7 +297,6 @@ import BobCore
         withAnimation(animation) {
             sessions.insert(session, at: 0)
             selectedID = session.id
-            draft = ""
             lastCreatedSessionID = session.id
         }
         scheduleSave()
@@ -281,12 +319,13 @@ import BobCore
                 sessions = [Session(projectPath: deleted.projectPath, provider: deleted.provider)]
             }
             selectedID = sessions[min(index, sessions.count - 1)].id
-            draft = ""
         }
         scheduleSave()
     }
     func select(_ id: UUID) {
-        selectedID = id; draft = ""
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        selectedID = id
+        composerFocusRequest = UUID()
     }
     func openProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
@@ -495,23 +534,42 @@ import BobCore
         }
     }
     func send(transport: (any ModelTransport)? = nil, reviewer: (any ToolSafetyReviewing)? = nil, titleTransport: (any ModelTransport)? = nil) {
-        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, let session = selected else { return }
+        let images = draftImages.map(\.image)
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !images.isEmpty, let session = selected else { return }
+        let prompt = text.isEmpty ? "Please look at the attached images." : text
         if let run = runs[session.id] {
-            let user = Message(role: .user, text: prompt, isSteering: true)
-            flushText(sessionID: session.id, run: run)
-            run.messageID = nil; run.waitingForSteering = true; run.activity = "Steering"
+            let user = Message(role: .user, text: prompt, isSteering: true, images: images)
             mutate(session.id) { $0.messages.append(user) }
-            run.input.send(prompt, id: user.id)
-            run.harness.steer()
-            draft = ""
+            if let router = followUpRouter {
+                run.followUps.append(user)
+                run.routingGeneration += 1
+                let previous = run.routingTask
+                let history = session.turns
+                run.routingTask = Task {
+                    await previous?.value
+                    guard !Task.isCancelled else { return }
+                    let disposition = (try? await router(history, prompt)) ?? .steer
+                    guard !Task.isCancelled, runs[session.id] === run else { return }
+                    if disposition == .steer {
+                        // Deliver earlier queued messages first to preserve submission order.
+                        let index = run.followUps.firstIndex { $0.id == user.id }!
+                        let updates = Array(run.followUps.prefix(index + 1))
+                        run.followUps.removeFirst(index + 1)
+                        for update in updates { steer(update, sessionID: session.id, run: run) }
+                    }
+                }
+            } else {
+                steer(user, sessionID: session.id, run: run)
+            }
+            draft = ""; draftImages = []
             lastSubmittedSessionID = session.id; lastSubmittedMessage = user
             saveNow()
             return
         }
         guard !hasUnsavedEdits else { error = "Save or discard unsaved files before starting the agent."; return }
-        draft = ""
-        let userMessage = Message(role: .user, text: prompt)
+        draft = ""; draftImages = []
+        let userMessage = Message(role: .user, text: prompt, images: images)
         let message = Message(role: .assistant, text: "")
         let harness = AgentHarness(reviewer: reviewer)
         let run = SessionRun(id: message.id, harness: harness)
@@ -521,7 +579,7 @@ import BobCore
         mutate(session.id) {
             if needsTitle { $0.title = fallbackTitle }
             $0.messages.append(userMessage); $0.messages.append(message)
-            $0.turns.append(ModelMessage(role: "user", text: prompt, userMessageID: userMessage.id))
+            $0.turns.append(ModelMessage(role: "user", text: prompt, images: images, userMessageID: userMessage.id))
         }
         // Persist the UI run identity before the journal can record side effects.
         do { try persistence.save(WorkspaceSnapshot(sessions: sessions, selectedSessionID: selectedID, settings: settings)) }
@@ -545,6 +603,11 @@ import BobCore
                 if text.hasPrefix("computer_") { openPanel(.computer) }
                 if text != "Thinking" && text != "Compacting context" { mutate(session.id) { $0.messages.append(Message(role: .activity, text: text)) } }
             case .approval(let request): run.approval = request
+            case .userInput(let request): run.userInput = request
+            case .userAnswer(let text):
+                flushText(sessionID: session.id, run: run)
+                mutate(session.id) { $0.messages.append(Message(role: .user, text: text)) }
+                saveNow()
             case .history(let history): mutate(session.id) { $0.turns = history }
             case .usage(let record): mutate(session.id) { $0.recordTokenUsage(record) }
             case .context(let usage): mutate(session.id) { $0.contextUsage = usage }
@@ -574,7 +637,9 @@ import BobCore
             defer {
                 flushText(sessionID: session.id, run: run)
                 mutate(session.id) { session in
-                    let pending = run.input.takePending()
+                    let pending = run.input.takePending() + run.followUps.map {
+                        ModelMessage(role: "user", text: $0.text, images: $0.images ?? [], userMessageID: $0.id)
+                    }
                     if !pending.isEmpty { session.turns = ConversationHistory.repaired(session.turns) + pending }
                     for index in session.messages.indices where session.messages[index].tool?.status == .running {
                         session.messages[index].tool?.finish(output: "Interrupted. Inspect current state before repeating this operation.", cancelled: true)
@@ -599,9 +664,26 @@ import BobCore
                     current = try await harness.run(configuration: configuration, messages: current, userRequests: userRequests, files: files, project: session.projectPath, transport: transport, browser: browser, computer: computer, workspace: self, workspaceSessionID: session.id, journal: journal, runID: message.id, surfaces: surfaces,
                         claudeExecutable: connections.claude.executable, claudeSessionID: sessions.first { $0.id == session.id }?.claudeCodeSessionID, input: run.input)
                     mutate(session.id) { $0.turns = current }
+                    // Wait for routing, including messages submitted while an earlier
+                    // classification was running, before declaring this run complete.
+                    while let routing = run.routingTask {
+                        let generation = run.routingGeneration
+                        await routing.value
+                        if generation == run.routingGeneration { run.routingTask = nil }
+                    }
+                    try Task.checkCancellation()
+                    let queued = run.followUps
+                    run.followUps = []
+                    for update in queued {
+                        run.input.send(update.text, id: update.id, images: update.images ?? [])
+                    }
                     // Input can arrive while a backend flushes its final result.
                     // This check and run cleanup share the main actor with Send.
                 } while run.input.hasPending
+                try Task.checkCancellation()
+                if let completed = sessions.first(where: { $0.id == session.id }) {
+                    completionAlert(completed, run.id)
+                }
             } catch is CancellationError {
                 mutate(session.id) { $0.messages.append(Message(role: .activity, text: "Stopped. Send a follow-up to continue.")) }
             } catch {
@@ -609,6 +691,13 @@ import BobCore
             }
         }
     }
+    private func steer(_ user: Message, sessionID: UUID, run: SessionRun) {
+        flushText(sessionID: sessionID, run: run)
+        run.messageID = nil; run.waitingForSteering = true; run.activity = "Steering"
+        run.input.send(user.text, id: user.id, images: user.images ?? [])
+        run.harness.steer()
+    }
+
     private func generateTitle(sessionID: UUID, messageID: UUID, prompt: String, fallback: String,
                                configuration: ModelConfiguration, transport: (any ModelTransport)?) {
         guard titleTasks[sessionID] == nil, !manuallyNamedSessionIDs.contains(sessionID),
@@ -636,6 +725,7 @@ import BobCore
         saveNow()
     }
     private func stop(sessionID: UUID) {
+        runs[sessionID]?.routingTask?.cancel()
         runs[sessionID]?.harness.stop(); runs[sessionID]?.task?.cancel(); titleTasks[sessionID]?.cancel()
     }
     func stopAll() { for id in Set(runs.keys).union(titleTasks.keys) { stop(sessionID: id) } }
@@ -772,6 +862,20 @@ import BobCore
     }
     private func configureBrowser() {
         browser.onAgentUse = { [weak self] in self?.openPanel(.browser) }
+    }
+    func toggleEditorTerminal() {
+        guard showWorkspacePanel else { return }
+        if showEditorTerminal && selectedPanel == .editor {
+            showEditorTerminal = false
+            editorFocusRequest = UUID()
+            return
+        }
+        do { try terminal.start(directory: projectPath) } catch {
+            self.error = error.localizedDescription
+            return
+        }
+        openPanel(.editor)
+        showEditorTerminal = true
     }
     func startTerminal() {
         openPanel(.terminal)

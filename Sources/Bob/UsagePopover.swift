@@ -29,7 +29,6 @@ struct UsagePopover: View {
                 if let account {
                     Text(account.email).foregroundStyle(Theme.secondary).textSelection(.enabled)
                     if let snapshot = usage.snapshot {
-                        if let plan = snapshot.planType { LabeledContent("Plan", value: plan.capitalized) }
                         ForEach(snapshot.buckets) { bucket in
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(bucket.name ?? bucket.id.replacingOccurrences(of: "_", with: " ").capitalized)
@@ -54,22 +53,9 @@ struct UsagePopover: View {
                     Text("Connect your account to view usage.").foregroundStyle(Theme.secondary)
                     Button("Connect account", action: connect)
                 }
-                if let chat = store.selected {
-                    Divider()
-                    Text("Current chat").fontWeight(.semibold)
-                    Text(chat.title).foregroundStyle(Theme.secondary).textSelection(.enabled)
-                    LabeledContent("Provider", value: chat.provider.title)
-                    LabeledContent("Model", value: store.selectedModelName == "Select model" ? store.selectedModelID : store.selectedModelName)
-                    LabeledContent("Effort", value: store.selectedReasoningEffort?.capitalized ?? "Auto")
-                    if let tokens = chat.totalTokenUsage {
-                        LabeledContent("Input ↑", value: tokens.inputTokens.formatted() + " tokens")
-                        LabeledContent("Output ↓", value: tokens.outputTokens.formatted() + " tokens")
-                    } else {
-                        Text("Token usage has not been reported for this chat.").foregroundStyle(Theme.secondary)
-                    }
-                }
+
             }.padding(18)
-        }.frame(width: 350, height: account != nil ? 520 : 250)
+        }.frame(width: 350, height: account != nil ? 400 : 160)
             .font(.system(size: 11)).foregroundStyle(Theme.text).background(Theme.panel)
             .buttonStyle(.borderless).tint(Theme.accent)
             .task(id: account?.id) {

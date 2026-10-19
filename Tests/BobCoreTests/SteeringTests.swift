@@ -75,6 +75,23 @@ private actor SteeringReadModel: ModelTransport {
     }
 }
 
+private actor QueuedFollowUpModel: ModelTransport {
+    private(set) var inputs: [[ModelMessage]] = []
+    private(set) var cancelled = false
+    private var released = false
+    func release() { released = true }
+    func complete(messages: [ModelMessage], system: String, tools: [ToolDefinition], onText: @escaping (String) async -> Void) async throws -> ModelMessage {
+        inputs.append(messages)
+        if inputs.count == 1 {
+            await onText("Working on original")
+            do { while !released { try await Task.sleep(for: .milliseconds(5)) } }
+            catch { cancelled = true; throw error }
+            return .init(role: "assistant", text: "Original finished")
+        }
+        return .init(role: "assistant", text: "Follow-up finished")
+    }
+}
+
 @MainActor final class SteeringTests: XCTestCase {
     private func workspace() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("bob-steering-\(UUID())")
@@ -92,6 +109,54 @@ private actor SteeringReadModel: ModelTransport {
         let store = AppStore(projectPath: root.path, storageDirectory: root.appendingPathComponent("state"))
         store.newSession(provider: .compatible); store.setModel("fixture")
         return store
+    }
+
+    func testQueuedFollowUpWaitsForOriginalCompletion() async throws {
+        let root = try workspace(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = store(root), model = QueuedFollowUpModel()
+        defer { store.shutdown() }
+        store.followUpRouter = { _, _ in .queue }
+        store.draft = "Original task"
+        store.send(transport: model, reviewer: FixtureToolSafetyReviewer())
+        try await waitUntil { store.selected?.messages.last?.text == "Working on original" }
+        store.draft = "Afterwards add tests"; store.send()
+        try await Task.sleep(for: .milliseconds(50))
+        let before = await model.inputs
+        XCTAssertEqual(before.count, 1)
+        XCTAssertEqual(before[0].filter { $0.role == "user" }.map(\.text), ["Original task"])
+        await model.release()
+        try await waitUntil { !store.isRunning }
+        let inputs = await model.inputs
+        XCTAssertEqual(inputs.count, 2)
+        XCTAssertTrue(inputs[1].contains { $0.text == "Original finished" })
+        XCTAssertEqual(inputs[1].last?.text, "Afterwards add tests")
+        let cancelled = await model.cancelled
+        XCTAssertFalse(cancelled)
+    }
+
+    func testRoutingFailureFallsBackToSteering() async throws {
+        let root = try workspace(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = store(root), model = SteeringModel()
+        defer { store.shutdown() }
+        store.followUpRouter = { _, _ in throw BobError.message("Unavailable") }
+        store.draft = "Original task"; store.send(transport: model, reviewer: FixtureToolSafetyReviewer())
+        try await waitUntil { store.selected?.messages.last?.text == "Original work" }
+        store.draft = "Do not edit"; store.send()
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.selected?.messages.last?.text, "Updated: Do not edit")
+    }
+
+    func testStopPreservesQueuedFollowUp() async throws {
+        let root = try workspace(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = store(root), model = QueuedFollowUpModel()
+        defer { store.shutdown() }
+        store.followUpRouter = { _, _ in .queue }
+        store.draft = "Original task"; store.send(transport: model, reviewer: FixtureToolSafetyReviewer())
+        try await waitUntil { store.selected?.messages.last?.text == "Working on original" }
+        store.draft = "Next task"; store.send()
+        store.stop()
+        try await waitUntil { !store.isRunning }
+        XCTAssertEqual(store.selected?.turns.filter { $0.role == "user" }.map(\.text), ["Original task", "Next task"])
     }
 
     func testMessagesDuringGenerationSteerTheSameRunInOrderAndSurviveReopen() async throws {

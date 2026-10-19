@@ -30,7 +30,7 @@ struct EditorSplitView: NSViewControllerRepresentable {
         files.minimumThickness = 0
         files.maximumThickness = NSSplitViewItem.unspecifiedDimension
         files.holdingPriority = NSLayoutConstraint.Priority(252)
-        editorItem = NSSplitViewItem(viewController: NSHostingController(rootView: EditorView(store: store)))
+        editorItem = NSSplitViewItem(viewController: NSHostingController(rootView: EditorWithTerminalView(store: store)))
         editorItem.minimumThickness = 260
         editorItem.holdingPriority = NSLayoutConstraint.Priority(251)
         super.init(nibName: nil, bundle: nil)
@@ -87,4 +87,28 @@ struct EditorSplitView: NSViewControllerRepresentable {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+/// The drawer belongs to the editor column, leaving the file tree full-height.
+private struct EditorWithTerminalView: View {
+    @ObservedObject var store: AppStore
+    var body: some View {
+        VSplitView {
+            EditorView(store: store).frame(minHeight: 120)
+            if store.showEditorTerminal {
+                VStack(spacing: 0) {
+                    HStack {
+                        Label("Terminal", systemImage: "terminal")
+                        Spacer()
+                        Button { store.terminal.clear() } label: { Image(systemName: "trash") }
+                            .help("Clear Terminal")
+                        Button { store.toggleEditorTerminal() } label: { Image(systemName: "xmark") }
+                            .help("Hide Terminal · ⌥`")
+                    }.font(.system(size: 11)).buttonStyle(.plain)
+                        .padding(.horizontal, 12).frame(height: 30).background(Theme.panel)
+                    TerminalTextView(session: store.terminal, focusOnOpen: true)
+                }.frame(minHeight: 100, idealHeight: 220)
+            }
+        }
+    }
 }

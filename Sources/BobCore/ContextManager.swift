@@ -1,9 +1,9 @@
 import Foundation
 
 public struct ContextManager {
-    /// Conservative local budget when a provider does not publish model limits.
+    /// Default local budget, separate from any provider-reported model limits.
     public let inputTokenBudget: Int
-    public init(inputTokenBudget: Int = 24_000) { self.inputTokenBudget = max(1024, inputTokenBudget) }
+    public init(inputTokenBudget: Int = 300_000) { self.inputTokenBudget = max(1024, inputTokenBudget) }
 
     public func estimatedTokens(_ messages: [ModelMessage]) -> Int {
         let textOnly = messages.map { message in var copy = message; copy.images = nil; return copy }

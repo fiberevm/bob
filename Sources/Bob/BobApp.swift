@@ -10,6 +10,7 @@ extension FocusedValues {
 }
 
 @main struct BobApp: App {
+    @StateObject private var activity = ActivityMenuStore()
     @FocusedValue(\.workspaceStore) private var store
     @Environment(\.openWindow) private var openWindow
     private static var initialProject: String {
@@ -21,7 +22,7 @@ extension FocusedValues {
     }
     var body: some Scene {
         WindowGroup("Bob", id: "project", for: String.self) { $project in
-            ProjectWindow(projectPath: project)
+            ProjectWindow(projectPath: project, activity: activity)
         } defaultValue: { Self.initialProject }
         .defaultSize(width: 1440, height: 920)
         .windowStyle(.hiddenTitleBar)
@@ -42,6 +43,7 @@ extension FocusedValues {
             CommandMenu("Workspace") {
                 Button("Command Center…") { store?.openCommandPalette() }.keyboardShortcut("k")
                 Button("Find File…") { store?.openCommandPalette(scope: .files) }.keyboardShortcut("p")
+                Button("Toggle Editor Terminal") { store?.toggleEditorTerminal() }.keyboardShortcut("`", modifiers: .option).disabled(store?.showWorkspacePanel != true)
                 Button("Show Terminal") { store?.startTerminal() }.keyboardShortcut("j")
                 Button("Show Editor") { store?.openPanel(.editor) }.keyboardShortcut("1", modifiers: [.command, .option])
                 Button("Show Changes") { store?.openPanel(.changes) }.keyboardShortcut("2", modifiers: [.command, .option])
@@ -55,18 +57,31 @@ extension FocusedValues {
                 Button("Undo Last Bob File Edit") { store?.undoFile() }.disabled(store?.checkpoints.isEmpty != false)
             }
         }
+
+        MenuBarExtra {
+            ActivityMenu(activity: activity)
+        } label: {
+            Label(activity.summary, systemImage: activity.symbol)
+                .accessibilityLabel(activity.summary)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
 private struct ProjectWindow: View {
     @StateObject private var store: AppStore
+    let activity: ActivityMenuStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
-    init(projectPath: String) { _store = StateObject(wrappedValue: AppStore(projectPath: projectPath)) }
+    init(projectPath: String, activity: ActivityMenuStore) {
+        _store = StateObject(wrappedValue: AppStore(projectPath: projectPath))
+        self.activity = activity
+    }
     var body: some View {
         WorkspaceView(store: store)
             .frame(minWidth: 1080, minHeight: 700)
             .focusedSceneValue(\.workspaceStore, store)
+            .background(ActivityWindowRegistration(store: store, activity: activity))
             .onAppear {
                 let open = openWindow, close = dismiss
                 store.onOpenProject = { [weak store] path in
@@ -74,7 +89,10 @@ private struct ProjectWindow: View {
                     if store?.boundProjectPath.isEmpty == true { close() }
                 }
             }
-            .onDisappear { store.shutdown() }
+            .onDisappear {
+                activity.unregister(store)
+                store.shutdown()
+            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.shutdown() }
     }
 }
