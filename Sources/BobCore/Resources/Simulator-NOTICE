@@ -1,0 +1,21 @@
+Bob simulator integration
+
+The runtime bridge, IOSurface framebuffer callbacks, and Indigo digitizer dispatch
+in SimulatorBridge.swift and SimulatorInput.swift are adapted from:
+
+SimKit / SimulatorView
+Copyright 2026 Yuta Ooka (https://github.com/subdiox)
+https://github.com/subdiox/SimKit
+Revision 74c895ea4b696ad51cf18f7204ab6fb79dde8915
+Licensed under the Apache License, Version 2.0.
+
+SimKit includes software developed at tddworks:
+https://github.com/tddworks/baguette
+Its CoreSimulator + SimulatorKit runtime bridge and IOSurface framebuffer logic
+are derived from baguette's CoreSimulators.swift and SimulatorKitScreen.swift,
+also licensed under the Apache License, Version 2.0.
+
+Bob modifications: reduced the API to a project-scoped native tab; checked runtime
+selectors and message size; delivered framebuffer callbacks on the main queue;
+rendered IOSurfaces in a native layer; added focus-scoped user input and lifecycle
+cleanup. No SimKit or baguette package is required at runtime.

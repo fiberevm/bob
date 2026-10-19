@@ -1,0 +1,20 @@
+{
+  "state": "Please inspect the changes in Sources/Bob/ChatView.swift and review them for bugs.",
+  "questions": [
+    {
+      "id": "intent",
+      "type": "choice",
+      "instructions": "What does the user want to do?",
+      "choices": {
+        "review": "Review code for bugs",
+        "edit": "Implement or edit code",
+        "question": "Answer a general question"
+      }
+    },
+    {
+      "id": "needs_browser",
+      "type": "noul",
+      "instructions": "Does this request require browsing a website?"
+    }
+  ]
+}

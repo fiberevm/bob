@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Bob</string>
+    <key>CFBundleDisplayName</key><string>Bob</string>
+    <key>CFBundleIdentifier</key><string>com.bob.native</string>
+    <key>CFBundleExecutable</key><string>Bob</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleIconFile</key><string>Bob.icns</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSScreenCaptureUsageDescription</key><string>Bob captures approved app windows so the agent can inspect and operate their interfaces.</string>
+    <key>NSAccessibilityUsageDescription</key><string>Bob uses Accessibility to read and interact with approved app controls.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
+</dict>
+</plist>
